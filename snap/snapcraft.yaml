@@ -14,7 +14,7 @@ confinement: strict
 
 # We use the upstream versioning of foomatic-db as it contains most of
 # the manufacturer-supplied PostScript PPD files
-adopt-info: pappl
+adopt-info: ghostscript
 
 # Only build on the architectures supported
 architectures:
