@@ -14,7 +14,7 @@ confinement: strict
 
 # We use the upstream versioning of foomatic-db as it contains most of
 # the manufacturer-supplied PostScript PPD files
-adopt-info: gutenprint
+adopt-info: hplip
 
 # Only build on the architectures supported
 architectures:
@@ -37,6 +37,326 @@ apps:
     plugs: [avahi-control, home, network, network-bind, raw-usb]
 
 parts:
+  hplip:
+    # We use the Debian package source instead of the upstream source code
+    # of HPLIP as the Debian package has ~80 patches fixing bugs which are
+    # reported upstream but the patches not adopted upstream.
+    # This way we should have the same user experience in terms of reliability
+    # and quality as with the Debian package.
+    # Note that the repository has all patches already applied, so we do
+    # not need to apply them before building.
+    # Debian source
+    source: https://salsa.debian.org/printing-team/hplip.v2.git
+    source-type: git
+    source-tag: 'debian/3.22.10+dfsg0-4'
+    source-depth: 1 
+# ext:updatesnap
+#   version-format:
+#     format: 'debian/%V'
+    # Upstream source
+    #source: https://sourceforge.net/projects/hplip/files/hplip/3.22.10/hplip-3.22.10.tar.gz
+    plugin: autotools
+    build-environment:
+      - PYTHON: python3
+      - LD_LIBRARY_PATH: $CRAFT_STAGE/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+      - CUPS_DATADIR: $CRAFT_STAGE/usr/share/cups
+      - PPDC_DATADIR: $CRAFT_STAGE/usr/share/ppdc
+      # Disable ImageProcesssor (for Debian source)
+      - IMAGEPROC: disable
+      # ImageProcessor oly on amd64 (for upstream source)
+      #- on amd64:
+      #  - IMAGEPROC: enable
+      #- else:
+      #  - IMAGEPROC: disable
+      - on arm64:
+        - BUILDARCH: aarch64-unknown-linux-gnu
+      - else:
+        - BUILDARCH: $CRAFT_ARCH_TRIPLET
+    # Paremeter list here only needed for upstream source, but no need to
+    # comment out for Debian source
+    autotools-configure-parameters:
+      - --build=$BUILDARCH
+      - --prefix=/usr
+      - --disable-foomatic-rip-hplip-install
+      - --without-docdir
+      - --without-htmldir
+      - --with-hpppddir=/usr/share/ppd/hplip/HP
+      - --without-drvdir
+      - --without-icondir
+      - --enable-hpcups-install
+      - --disable-cups-drv-install
+      - --enable-cups-ppd-install
+      - --disable-hpijs-install
+      - --disable-foomatic-drv-install
+      - --disable-foomatic-ppd-install
+      - --$IMAGEPROC-imageProcessor-build
+      - --enable-network-build
+      - --disable-class-driver
+      - --disable-scan-build
+      - --disable-gui-build
+      - --disable-fax-build
+      - --disable-qt3
+      - --disable-qt4
+      - --disable-qt5
+      - --disable-policykit
+    override-pull: |
+      set -eux
+      # Do the actual pull task
+      craftctl default
+      # Settings:
+      # Force channel: auto/devel/edge/stable
+      CHANNEL=stable
+      # Force package release number (integer) or "auto"
+      PACKAGERELEASE=auto
+      # Time stamp of Snap build in Snap Store
+      snapbuilddatehuman=`curl -s -H 'Snap-Device-Series: 16' https://api.snapcraft.io/v2/snaps/info/hplip-printer-app | jq -r '."channel-map" | .[] | select(.channel.name == "edge") | select(.channel.architecture == "amd64") | ."created-at"'`
+      snapbuilddate=`date +%s --date=$snapbuilddatehuman`
+      if [ -z "$snapbuilddate" ]; then
+          snapbuilddate=0
+      fi
+      # Time stamp of the last GIT commit of the snapping repository
+      pushd $CRAFT_PROJECT_DIR
+      gitcommitdate=`git log -1 --date=unix | grep Date: | perl -p -e 's/Date:\s*//'`
+      popd
+      if [ -z "$gitcommitdate" ]; then
+          gitcommitdate=0
+      fi
+      # Previous stable and development version
+      prevstable="$(curl -s -H 'Snap-Device-Series: 16' https://api.snapcraft.io/v2/snaps/info/hplip-printer-app | jq -r '."channel-map" | .[] | select(.channel.name == "stable") | select(.channel.architecture == "'$CRAFT_TARGET_ARCH'") | .version')"
+      if [ -z "$prevstable" ]; then
+          prevstable=0
+      fi
+      prevdevel="$(curl -s -H 'Snap-Device-Series: 16' https://api.snapcraft.io/v2/snaps/info/hplip-printer-app | jq -r '."channel-map" | .[] | select(.channel.name == "edge") | select(.channel.architecture == "'$CRAFT_TARGET_ARCH'") | .version')"
+      if [ -z "$prevdevel" ]; then
+          prevdevel=0
+      fi
+      # Previous version in general
+      dpkg --compare-versions "$prevdevel" lt "$prevstable" && prevversion=$prevstable || prevversion=$prevdevel
+      # Current upstream version of HPLIP
+      upstreamversion="$(git describe --tags --always | sed -E 's/^v//;s/[+_].*//;y/-/./;s/^debian\///')"
+      # Determine package release number
+      if test "x$PACKAGERELEASE" = "xauto"; then
+          packagerelease=`echo "$prevversion" | perl -p -e 's/^('"$upstreamversion"'\-(\d+)|.*)$/\2/'`
+          if [ -z "$packagerelease" ]; then
+              packagerelease=1
+          else
+              if test "$gitcommitdate" -gt "$snapbuilddate"; then
+                  packagerelease=$(( $packagerelease + 1 ))
+              fi
+          fi
+      else
+          packagerelease=$PACKAGERELEASE
+      fi
+      # Compose version string
+      version="$upstreamversion-$packagerelease"
+      # Select channel
+      if test "x$CHANNEL" = "xedge" -o "x$CHANNEL" = "xdevel"; then
+          grade=devel
+      elif test "x$CHANNEL" = "xstable"; then
+          grade=stable
+      else
+          [ -n "$(echo $version | grep "+git")" ] && grade=devel || grade=stable
+      fi
+      # Set version and grade
+      craftctl set version="$version"
+      craftctl set grade="$grade"
+    # We need the PostScript and hpcups PPDs, the hpps and hpcups filters,
+    # the hp backend, and the hp-probe utility
+    override-build: |
+      set -eux
+      # Correct hard-coded /etc/hp/ path in Makefile
+      perl -p -i -e 's:/etc/hp:/snap/hplip-printer-app/current/etc/hp:' Makefile*
+      # Remove hard-coded linking of binary-only libImageProcessor
+      # in Makefile for non-amd64 architectures (for upstream source)
+      #if echo $CRAFT_ARCH_TRIPLET | grep -qv x86_64; then
+      #  perl -p -i -e 's: -lImageProcessor::' Makefile*
+      #fi
+      # Do the "./configure" (for Debian source)
+      sh debian/autogen.sh
+      ./configure \
+        --build=$BUILDARCH \
+        --prefix=/usr \
+        --disable-foomatic-rip-hplip-install \
+        --without-docdir \
+        --without-htmldir \
+        --with-hpppddir=/usr/share/ppd/hplip/HP \
+        --without-drvdir \
+        --without-icondir \
+        --enable-hpcups-install \
+        --disable-cups-drv-install \
+        --enable-cups-ppd-install \
+        --disable-hpijs-install \
+        --disable-foomatic-drv-install \
+        --disable-foomatic-ppd-install \
+        --$IMAGEPROC-imageProcessor-build \
+        --enable-network-build \
+        --disable-class-driver \
+        --disable-scan-build \
+        --disable-gui-build \
+        --disable-fax-build \
+        --disable-qt3 \
+        --disable-qt4 \
+        --disable-qt5 \
+        --disable-policykit
+      # Following step needed because of the Debian patches (for Debian source)
+      # Compress various files before building, they are needed for the build,
+      # and were compressed in the non-repacked upstream tarballs
+      find . -name '*.ppd' | xargs gzip -f
+      find data/ -regextype posix-extended -regex '.*\.(ldl|pcl|ps|pdf)' | xargs gzip -f
+      # Following step needed because of the Debian patches (for Debian source)
+      # Rebuild the .drv.in files from drv.in.template
+      python3 ./dat2drv.py
+      # Correct hard-coded paths in C/C++ source code
+      # The /etc/... and /usr/... paths in these files do not need to get
+      # corrected, only the /var/... ones
+      perl -p -i -e 's:\"/var/lib/hp:\"/var/snap/hplip-printer-app/common/var/:' common/utils.[ch]
+      # Set path for dynamic link libraries of the proprietary plugin
+      # We have to apply this patch here as patches on the C/C++ code need
+      # to get applied before compiling
+      patch -p0 < $CRAFT_PROJECT_DIR/snap/local/hplip-plugin-library-load-path.patch
+      # Do the "./configure; make; make install" (for upstream source)
+      # craftctl default
+      # Do the "make; make install" (for Debian source)
+      make
+      make DESTDIR=$CRAFT_PART_INSTALL install
+      # Correct hard-coded paths in hplip.conf
+      ( cd $CRAFT_PART_INSTALL/snap/hplip-printer-app/current/etc/hp; \
+        perl -p -i -e 's:/var/:/var/snap/hplip-printer-app/common/var/:' hplip.conf; \
+        perl -p -i -e 's:/usr/share/:/snap/hplip-printer-app/current/usr/share/:' hplip.conf; \
+        perl -p -i -e 's:/usr/share/ppd/hplip:/usr/share/ppd:' hplip.conf; \
+        perl -p -i -e 's:/usr/share/ppd/HP:/usr/share/ppd:' hplip.conf; \
+        perl -p -i -e 's:/usr/lib/cups/:/snap/hplip-printer-app/current/usr/lib/hplip-printer-app/:' hplip.conf; \
+      )
+      # Correct hard-coded /var and /etc paths in the utilities written in
+      # Python
+      ( cd $CRAFT_PART_INSTALL/usr/share/hplip/
+        perl -p -i -e 's:/var/(\S+)/hp:/var/snap/hplip-printer-app/common/var/\1/hp:' *.py */*.py */*/*.py
+        perl -p -i -e 's:/var/lib/hp:/var:' *.py */*.py */*/*.py
+        perl -p -i -e 's:/etc/hp:/snap/hplip-printer-app/current/etc/hp:' *.py */*.py */*/*.py
+        # Set path for firmware files of the proprietary plugin
+        # We have to apply this patch here so that the global corrections done
+        # right above do not mess it up
+        patch -p0 < $CRAFT_PROJECT_DIR/snap/local/hplip-plugin-firmware-load-path.patch
+      )
+      # Correct Python shebang in the utilities
+      ( cd $CRAFT_PART_INSTALL; \
+        for file in usr/bin/hp-*; do \
+          perl -p -i -e 's:^\s*\#\!\s*/usr/bin/env\s+python.*:#!/snap/hplip-printer-app/current/usr/bin/python3:' `readlink -f $file`; \
+        done; \
+      )
+      # "make install" install Python extension modules to the wrong place
+      # (for Debian source)
+      rm $CRAFT_PART_INSTALL/usr/lib/python*/site-packages/*.la
+      mkdir -p $CRAFT_PART_INSTALL/usr/lib/python3/dist-packages
+      mv $CRAFT_PART_INSTALL/usr/lib/python*/site-packages/*.so $CRAFT_PART_INSTALL/usr/lib/python3/dist-packages
+      # "make install" misses to install the PostScript PPD files, do it now
+      # (for Debian source)
+      cp prnt/ps/*.ppd.gz $CRAFT_PART_INSTALL/usr/share/ppd/hplip/HP/
+      # Handle the PPD files: Unzip, remove "(recommended)" (we have only
+      # HPLIP here, no other driver), compress into self-extracting archive
+      ( cd $CRAFT_PART_INSTALL/usr/share/ppd/hplip/HP/; \
+        find . -name '*.gz' | xargs gunzip -f; \
+        for file in `find . -name '*.ppd'`; do \
+          perl -p -i -e 's/(\*NickName:.*\S+)\s*\(recommended\)/\1/' $file; \
+        done; \
+        PYTHONPATH=$CRAFT_STAGE/lib/python3.10/site-packages $CRAFT_STAGE/bin/pyppd -v -o hplip-ppds .; \
+        mv hplip-ppds ../..; \
+        cd ../..; \
+        rm -rf hplip; \
+      )
+      # Link Python 3 to the "python" executable name (no older Python in this
+      # Snap and everything needs Python 3)
+      ln -sf python3 $CRAFT_PART_INSTALL/usr/bin/python
+      # Install the binary-only libImageProcessor only if we build the Snap for
+      # amd64 (x86_64) (for upstream source)
+      #if echo $CRAFT_ARCH_TRIPLET | grep -q x86_64; then
+      #  cp prnt/hpcups/libImageProcessor-x86_64.so $CRAFT_PART_INSTALL/usr/lib/libImageProcessor.so
+      #fi
+      # Install the public key for verifying the signature of the proprietary
+      # plugin (for Debian source)
+      cp debian/upstream/signing-key.asc $CRAFT_PART_INSTALL/usr/share/hplip/
+    build-packages:
+      - ubuntu-dev-tools
+      - dpkg-dev
+      - fakeroot
+      - automake
+      - gawk
+      - python3-dev
+      - libpython3-dev
+      - fdupes
+      - libavahi-client-dev
+      - libavahi-core-dev
+      - libdbus-1-dev
+      - libjpeg-dev
+      - libsnmp-dev
+      - libssl-dev
+      - libtool
+      - libudev-dev
+      - libusb-1.0-0-dev
+      - perl-base
+      - python3
+      - xz-utils
+      - jq
+      - curl
+    stage-packages:
+      - python3
+      - python3-minimal
+      - python3.10
+      - python3.10-minimal
+      - python3-dbus
+      - python3-distro
+      - python3-gi
+      - python3-pexpect
+      - python3-pil
+      - python3-reportlab
+      - libpython3.10
+      - libpython3.10-stdlib
+      - wget
+      - xz-utils
+      # We stage avahi-utils already in the "cups" part, to stage
+      # everything Avahi-related there, to avoid any file clashes.
+      #- avahi-utils
+      - libsnmp40
+      - libsnmp-base
+    organize:
+      usr/lib/cups/filter/hpcups: usr/lib/hplip-printer-app/filter/hpcups
+      usr/lib/cups/filter/hpps: usr/lib/hplip-printer-app/filter/hpps
+      usr/lib/cups/backend/hp: usr/lib/hplip-printer-app/backend/hp
+      snap/hplip-printer-app/current/etc: etc
+    prime:
+      - etc/hp
+      - -var
+      - usr/bin
+      - -usr/bin/pdb*
+      - -usr/bin/py*versions
+      - lib/*/lib*.so*
+      - usr/lib/lib*.so*
+      - usr/lib/*/lib*.so*
+      - usr/lib/python*
+      - -usr/include
+      - -usr/lib/pkgconfig
+      - -usr/share/fonts
+      - -usr/share/man
+      - -usr/share/doc
+      - -usr/share/doc-base
+      - -usr/share/lintian
+      - usr/share/hplip
+      - usr/share/ppd
+      - usr/share/snmp
+      - usr/lib/hplip-printer-app
+      - -usr/lib/cups
+      # Reported unused by snapcraft linter
+      - -usr/lib/libhpip.*
+      - -usr/lib/*/libavahi-core.*
+      - -usr/lib/*/libgdbm.*
+      - -usr/lib/*/libgdbm_compat.*
+      - -usr/lib/*/libnetsnmpagent.*
+      - -usr/lib/*/libnetsnmpmibs.*
+      - -usr/lib/*/libpci*
+      - -usr/lib/*/libsensors.*
+      - -usr/lib/*/libsnmp.*
+    after: [cups, pyppd]
+
   gutenprint:
     source: https://github.com/echiu64/gutenprint.git
     source-type: git
