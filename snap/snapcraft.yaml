@@ -14,7 +14,7 @@ confinement: strict
 
 # We use the upstream versioning of foomatic-db as it contains most of
 # the manufacturer-supplied PostScript PPD files
-adopt-info: foomatic-db
+adopt-info: gutenprint
 
 # Only build on the architectures supported
 architectures:
@@ -37,6 +37,149 @@ apps:
     plugs: [avahi-control, home, network, network-bind, raw-usb]
 
 parts:
+  gutenprint:
+    source: https://github.com/echiu64/gutenprint.git
+    source-type: git
+    source-tag: 'gutenprint-5_3_3'
+    source-depth: 1
+# ext:updatesnap
+#   version-format:
+#     format: 'gutenprint-%M_%m_%R'
+#     lower-than: '6'
+#     no-9x-revisions: true
+    plugin: autotools
+    # We only need the library, the XML resources,  and the CUPS driver
+    # (PPD generator, filter, backend)
+    autotools-configure-parameters:
+      - --prefix=/usr
+      - --datarootdir=/snap/gutenprint-printer-app/current/usr/share
+      - --enable-shared
+      - --disable-rpath
+      - --with-modules=static
+      - --without-gimp2
+      - --disable-libgutenprintui2
+      - --with-cups
+      - --enable-cups-level3-ppds
+      - --enable-translated-cups-ppds
+      - --enable-simplified-cups-ppds
+      - --enable-cups-1_2-enhancements
+      - --disable-cups-ppds
+      - --enable-escputil
+      - --disable-samples
+      - --disable-test
+      - --disable-testpattern
+      - --enable-nls
+      - --without-doc
+    override-pull: |
+      set -eux
+      # Do the actual pull task
+      craftctl default
+      # Settings:
+      # Force channel: auto/devel/edge/stable
+      CHANNEL=stable
+      # Force package release number (integer) or "auto"
+      PACKAGERELEASE=auto
+      # Time stamp of Snap build in Snap Store
+      snapbuilddatehuman=`curl -s -H 'Snap-Device-Series: 16' https://api.snapcraft.io/v2/snaps/info/gutenprint-printer-app | jq -r '."channel-map" | .[] | select(.channel.name == "edge") | select(.channel.architecture == "amd64") | ."created-at"'`
+      snapbuilddate=`date +%s --date=$snapbuilddatehuman`
+      if [ -z "$snapbuilddate" ]; then
+          snapbuilddate=0
+      fi
+      # Time stamp of the last GIT commit of the snapping repository
+      pushd $CRAFT_PROJECT_DIR
+      gitcommitdate=`git log -1 --date=unix | grep Date: | perl -p -e 's/Date:\s*//'`
+      popd
+      if [ -z "$gitcommitdate" ]; then
+          gitcommitdate=0
+      fi
+      # Previous stable and development version
+      prevstable="$(curl -s -H 'Snap-Device-Series: 16' https://api.snapcraft.io/v2/snaps/info/gutenprint-printer-app | jq -r '."channel-map" | .[] | select(.channel.name == "stable") | select(.channel.architecture == "'$CRAFT_TARGET_ARCH'") | .version')"
+      if [ -z "$prevstable" ]; then
+          prevstable=0
+      fi
+      prevdevel="$(curl -s -H 'Snap-Device-Series: 16' https://api.snapcraft.io/v2/snaps/info/gutenprint-printer-app | jq -r '."channel-map" | .[] | select(.channel.name == "edge") | select(.channel.architecture == "'$CRAFT_TARGET_ARCH'") | .version')"
+      if [ -z "$prevdevel" ]; then
+          prevdevel=0
+      fi
+      # Previous version in general
+      dpkg --compare-versions "$prevdevel" lt "$prevstable" && prevversion=$prevstable || prevversion=$prevdevel
+      # Current upstream version of gutenprint
+      upstreamversion="$(git describe --tags --always | sed -E 's/^gutenprint-([0-9]+_[0-9]+_[0-9]+).*$/\1/; s/_/\./g')"
+      # Determine package release number
+      if test "x$PACKAGERELEASE" = "xauto"; then
+          packagerelease=`echo "$prevversion" | perl -p -e 's/^('"$upstreamversion"'\-(\d+)|.*)$/\2/'`
+          if [ -z "$packagerelease" ]; then
+              packagerelease=1
+          else
+              if test "$gitcommitdate" -gt "$snapbuilddate"; then
+                  packagerelease=$(( $packagerelease + 1 ))
+              fi
+          fi
+      else
+          packagerelease=$PACKAGERELEASE
+      fi
+      # Compose version string
+      version="$upstreamversion-$packagerelease"
+      # Select channel
+      if test "x$CHANNEL" = "xedge" -o "x$CHANNEL" = "xdevel"; then
+          grade=devel
+      elif test "x$CHANNEL" = "xstable"; then
+          grade=stable
+      else
+          [ -n "$(echo $version | grep "+git")" ] && grade=devel || grade=stable
+      fi
+      # Set version and grade
+      craftctl set version="$version"
+      craftctl set grade="$grade"
+    build-packages:
+      - byacc
+      - libreadline-dev
+      - libusb-1.0-0-dev
+      - zlib1g-dev
+      - flex
+      - gettext
+      - chrpath
+      - libtool-bin
+      - jq
+      - curl
+    organize:
+      snap/gutenprint-printer-app/current/usr/share: usr/share
+      usr/lib/cups/filter/rastertogutenprint.5.3: usr/lib/gutenprint-printer-app/filter/rastertogutenprint.5.3
+      usr/lib/cups/filter/commandtoepson: usr/lib/gutenprint-printer-app/filter/commandtoepson
+      usr/lib/cups/filter/commandtocanon: usr/lib/gutenprint-printer-app/filter/commandtocanon
+      usr/lib/cups/backend/gutenprint53+usb: usr/lib/gutenprint-printer-app/backend/gutenprint53+usb
+      usr/share/cups/usb/net.sf.gimp-print.usb-quirks: usr/lib/gutenprint-printer-app/backend/net.sf.gimp-print.usb-quirks
+      usr/lib/cups/driver/gutenprint.5.3: usr/share/ppd/gutenprint.5.3
+    prime:
+      - usr/bin/cups-calibrate
+      - usr/bin/escputil
+      - usr/sbin/*genppd*
+      - usr/lib/lib*.so*
+      - usr/lib/gutenprint-printer-app
+      - usr/share/ppd/gutenprint.5.3
+      - usr/share/gutenprint
+      - usr/share/locale
+      - usr/share/cups/calibrate.ppm
+      - -snap
+      - -etc/fonts
+      - -var
+      - -usr/include
+      - -share/man
+      - -share/doc
+      - -share/lintian
+      - -usr/share/fonts
+      - -usr/share/man
+      - -usr/share/doc
+      - -usr/share/doc-base
+      - -usr/share/lintian
+      - -usr/share/gutenprint/doc
+      - -usr/lib/gutenprint
+      - -usr/lib/libgutenprint.a
+      - -usr/lib/libgutenprint.la
+      - -usr/lib/pkgconfig
+      - -usr/lib/cups
+    after: [cups]
+
   pappl:
     source: https://github.com/michaelrsweet/pappl
     source-type: git
