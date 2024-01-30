@@ -1,6 +1,6 @@
 name: ps-printer-app
 base: core22
-version: '3.22.10-1'
+version: '3.2'
 grade: 'stable'
 summary: PostScript Printer Application
 description: |
